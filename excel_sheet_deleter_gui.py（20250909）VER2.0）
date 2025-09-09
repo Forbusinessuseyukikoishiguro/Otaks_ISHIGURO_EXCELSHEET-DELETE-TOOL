@@ -1,0 +1,522 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+import os
+import shutil
+import zipfile
+from datetime import datetime
+from xml.etree import ElementTree as ET
+import tempfile
+import re
+
+
+class ExcelSheetDeleterGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Excel シート削除ツール（画像保持版）")
+        self.root.geometry("600x550")
+        self.root.resizable(True, True)
+        
+        # 初期ファイルパス
+        self.file_path = r"C:\Users\yukik\Desktop\excel\test\sales_demo_data.xlsx"
+        self.sheet_info = {}
+        self.worksheets_data = {}
+        
+        self.create_widgets()
+        self.load_initial_file()
+    
+    def create_widgets(self):
+        # メインフレーム
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # ファイル選択フレーム
+        file_frame = ttk.LabelFrame(main_frame, text="ファイル選択", padding="5")
+        file_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        # ファイルパス表示
+        self.file_path_var = tk.StringVar(value=self.file_path)
+        file_entry = ttk.Entry(file_frame, textvariable=self.file_path_var, width=60)
+        file_entry.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        
+        # ファイル選択ボタン
+        browse_btn = ttk.Button(file_frame, text="参照", command=self.browse_file)
+        browse_btn.grid(row=0, column=1)
+        
+        # 読み込みボタン
+        load_btn = ttk.Button(file_frame, text="読み込み", command=self.load_file)
+        load_btn.grid(row=0, column=2, padx=(5, 0))
+        
+        file_frame.columnconfigure(0, weight=1)
+        
+        # ファイル情報フレーム
+        info_frame = ttk.LabelFrame(main_frame, text="ファイル情報", padding="5")
+        info_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.info_label = ttk.Label(info_frame, text="ファイルを読み込んでください")
+        self.info_label.grid(row=0, column=0, sticky=tk.W)
+        
+        # 処理方法選択フレーム
+        method_frame = ttk.LabelFrame(main_frame, text="処理方法", padding="5")
+        method_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        
+        self.method_var = tk.StringVar(value="openpyxl_method")
+        
+        openpyxl_radio = ttk.Radiobutton(method_frame, text="標準方式（openpyxl）- 高速・安定", 
+                                        variable=self.method_var, value="openpyxl_method")
+        openpyxl_radio.grid(row=0, column=0, sticky=tk.W)
+        
+        hybrid_radio = ttk.Radiobutton(method_frame, text="画像保持方式（ハイブリッド）- 画像・チャート保持", 
+                                      variable=self.method_var, value="hybrid_method")
+        hybrid_radio.grid(row=1, column=0, sticky=tk.W)
+        
+        # 注意書きラベル
+        note_label = ttk.Label(method_frame, text="※ 画像保持方式は処理時間が長くなりますが、より安全です", 
+                              font=("TkDefaultFont", 8), foreground="blue")
+        note_label.grid(row=2, column=0, sticky=tk.W, padx=(20, 0))
+        
+        # シート選択フレーム
+        sheet_frame = ttk.LabelFrame(main_frame, text="削除するシートを選択", padding="5")
+        sheet_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 10))
+        
+        # スクロール可能なフレーム
+        canvas = tk.Canvas(sheet_frame, height=200)
+        scrollbar = ttk.Scrollbar(sheet_frame, orient="vertical", command=canvas.yview)
+        self.scrollable_frame = ttk.Frame(canvas)
+        
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+        
+        sheet_frame.columnconfigure(0, weight=1)
+        sheet_frame.rowconfigure(0, weight=1)
+        
+        # 操作ボタンフレーム
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=(0, 10))
+        
+        # 全選択/全解除ボタン
+        select_all_btn = ttk.Button(button_frame, text="全選択", command=self.select_all)
+        select_all_btn.grid(row=0, column=0, padx=(0, 5))
+        
+        deselect_all_btn = ttk.Button(button_frame, text="全解除", command=self.deselect_all)
+        deselect_all_btn.grid(row=0, column=1, padx=(0, 20))
+        
+        # バックアップ設定
+        self.backup_var = tk.BooleanVar(value=True)
+        backup_check = ttk.Checkbutton(button_frame, text="バックアップを作成", variable=self.backup_var)
+        backup_check.grid(row=0, column=2, padx=(0, 20))
+        
+        # 削除ボタン
+        delete_btn = ttk.Button(button_frame, text="選択したシートを削除", command=self.delete_sheets, style="Accent.TButton")
+        delete_btn.grid(row=0, column=3)
+        
+        # ステータスバー
+        self.status_var = tk.StringVar(value="準備完了")
+        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 0))
+        
+        # グリッドの重み設定
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(3, weight=1)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+    
+    def browse_file(self):
+        """ファイル選択ダイアログを開く"""
+        file_path = filedialog.askopenfilename(
+            title="Excelファイルを選択",
+            filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")],
+            initialdir=os.path.dirname(self.file_path)
+        )
+        if file_path:
+            self.file_path_var.set(file_path)
+            self.file_path = file_path
+    
+    def load_initial_file(self):
+        """初期ファイルを読み込む"""
+        if os.path.exists(self.file_path):
+            self.load_file()
+        else:
+            self.status_var.set(f"初期ファイルが見つかりません: {self.file_path}")
+    
+    def load_file(self):
+        """Excelファイルを読み込む"""
+        try:
+            file_path = self.file_path_var.get()
+            if not os.path.exists(file_path):
+                messagebox.showerror("エラー", "ファイルが見つかりません")
+                return
+            
+            # openpyxlで基本情報を取得
+            self.load_with_openpyxl(file_path)
+            self.file_path = file_path
+            
+            # ファイル情報を更新
+            sheet_count = len(self.sheet_info)
+            file_size = os.path.getsize(file_path)
+            self.info_label.config(text=f"シート数: {sheet_count}, ファイルサイズ: {file_size:,} bytes")
+            
+            # シート選択チェックボックスを作成
+            self.create_sheet_checkboxes()
+            
+            self.status_var.set(f"ファイルを読み込みました: {os.path.basename(file_path)}")
+            
+        except Exception as e:
+            messagebox.showerror("エラー", f"ファイルの読み込みに失敗しました:\n{e}")
+            self.status_var.set("エラー: ファイル読み込み失敗")
+    
+    def load_with_openpyxl(self, file_path):
+        """openpyxlでExcelファイルを読み込む"""
+        from openpyxl import load_workbook
+        
+        self.sheet_info = {}
+        workbook = load_workbook(file_path)
+        
+        for i, sheet_name in enumerate(workbook.sheetnames):
+            self.sheet_info[sheet_name] = {
+                'index': i,
+                'active': workbook.active.title == sheet_name if workbook.active else False
+            }
+    
+    def create_sheet_checkboxes(self):
+        """シート選択用のチェックボックスを作成"""
+        # 既存のウィジェットを削除
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+        
+        self.sheet_vars = {}
+        
+        # 各シート用のチェックボックスを作成
+        for i, (sheet_name, info) in enumerate(self.sheet_info.items()):
+            var = tk.BooleanVar()
+            self.sheet_vars[sheet_name] = var
+            
+            # チェックボックスとシート名を表示
+            frame = ttk.Frame(self.scrollable_frame)
+            frame.grid(row=i, column=0, sticky=(tk.W, tk.E), padx=5, pady=2)
+            
+            checkbox = ttk.Checkbutton(frame, variable=var)
+            checkbox.grid(row=0, column=0)
+            
+            label = ttk.Label(frame, text=f"{sheet_name}")
+            label.grid(row=0, column=1, sticky=tk.W, padx=(5, 0))
+            
+            # アクティブなシートは異なる色で表示
+            if info.get('active', False):
+                label.config(foreground="blue", font=("TkDefaultFont", 9, "bold"))
+                active_label = ttk.Label(frame, text="(アクティブ)", foreground="blue", font=("TkDefaultFont", 8))
+                active_label.grid(row=0, column=2, sticky=tk.W, padx=(5, 0))
+            
+            frame.columnconfigure(1, weight=1)
+        
+        self.scrollable_frame.columnconfigure(0, weight=1)
+    
+    def select_all(self):
+        """すべてのシートを選択"""
+        for var in self.sheet_vars.values():
+            var.set(True)
+    
+    def deselect_all(self):
+        """すべてのシートの選択を解除"""
+        for var in self.sheet_vars.values():
+            var.set(False)
+    
+    def extract_media_files(self, zip_file):
+        """Excelファイルから画像やメディアファイルを抽出"""
+        media_files = {}
+        
+        try:
+            for file_info in zip_file.infolist():
+                filename = file_info.filename
+                
+                # 画像、チャート、描画関連ファイルを特定
+                if (filename.startswith('xl/media/') or 
+                    filename.startswith('xl/charts/') or 
+                    filename.startswith('xl/drawings/') or
+                    filename.startswith('xl/embeddings/') or
+                    filename.startswith('xl/printerSettings/') or
+                    filename.startswith('xl/theme/') or
+                    filename.startswith('xl/vbaProject') or
+                    filename.endswith('.png') or
+                    filename.endswith('.jpg') or 
+                    filename.endswith('.jpeg') or 
+                    filename.endswith('.gif') or
+                    filename.endswith('.bmp') or
+                    filename.endswith('.emf') or
+                    filename.endswith('.wmf')):
+                    
+                    try:
+                        media_files[filename] = zip_file.read(filename)
+                    except Exception as e:
+                        print(f"メディアファイル読み込みエラー {filename}: {e}")
+                        continue
+                        
+        except Exception as e:
+            print(f"メディアファイル抽出エラー: {e}")
+            
+        return media_files
+    
+    def delete_sheets_hybrid_method(self, selected_sheets):
+        """ハイブリッド方式でシートを削除（画像・チャート保持、エラー回避）"""
+        try:
+            self.status_var.set("画像保持方式で処理中...")
+            self.root.update()
+            
+            # Step 1: 元ファイルから画像・メディアファイルを抽出
+            self.status_var.set("画像・メディアファイルを抽出中...")
+            self.root.update()
+            
+            media_files = {}
+            try:
+                with zipfile.ZipFile(self.file_path, 'r') as original_zip:
+                    media_files = self.extract_media_files(original_zip)
+                    
+                self.status_var.set(f"抽出完了: {len(media_files)}個のメディアファイル")
+                self.root.update()
+                
+            except Exception as e:
+                print(f"メディアファイル抽出でエラー: {e}")
+                # 抽出に失敗しても処理を続行
+            
+            # Step 2: openpyxlでシートを削除
+            self.status_var.set("シートを削除中...")
+            self.root.update()
+            
+            from openpyxl import load_workbook
+            workbook = load_workbook(self.file_path)
+            
+            deleted_count = 0
+            for sheet_name in selected_sheets:
+                if sheet_name in workbook.sheetnames:
+                    try:
+                        sheet = workbook[sheet_name]
+                        workbook.remove(sheet)
+                        deleted_count += 1
+                        self.status_var.set(f"削除中: {sheet_name} ({deleted_count}/{len(selected_sheets)})")
+                        self.root.update()
+                    except Exception as e:
+                        print(f"シート削除エラー {sheet_name}: {e}")
+                        continue
+            
+            # Step 3: ファイルを保存
+            self.status_var.set("ファイルを保存中...")
+            self.root.update()
+            workbook.save(self.file_path)
+            
+            # Step 4: 画像・メディアファイルを復元（可能な場合のみ）
+            if media_files:
+                self.status_var.set("画像・メディアファイルを復元中...")
+                self.root.update()
+                
+                try:
+                    # 一時ファイルを作成してメディアファイルを追加
+                    temp_path = self.file_path + '.temp'
+                    
+                    with zipfile.ZipFile(self.file_path, 'r') as source_zip:
+                        with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as target_zip:
+                            
+                            # 既存のファイルをコピー
+                            for item in source_zip.infolist():
+                                try:
+                                    data = source_zip.read(item.filename)
+                                    target_zip.writestr(item, data)
+                                except Exception as e:
+                                    print(f"ファイルコピーエラー {item.filename}: {e}")
+                                    continue
+                            
+                            # メディアファイルを追加（競合しない場合のみ）
+                            added_count = 0
+                            for filename, data in media_files.items():
+                                try:
+                                    # ファイルが既に存在するかチェック
+                                    existing_files = [f.filename for f in target_zip.infolist()]
+                                    if filename not in existing_files:
+                                        target_zip.writestr(filename, data)
+                                        added_count += 1
+                                except Exception as e:
+                                    print(f"メディアファイル追加エラー {filename}: {e}")
+                                    continue
+                    
+                    # 元ファイルを置き換え
+                    if os.path.exists(temp_path):
+                        shutil.move(temp_path, self.file_path)
+                        self.status_var.set(f"画像復元完了: {added_count}個のファイルを復元")
+                    
+                except Exception as e:
+                    print(f"画像復元エラー: {e}")
+                    # 復元に失敗しても、基本的なシート削除は成功しているので続行
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    self.status_var.set("シート削除完了（画像復元は部分的）")
+            
+            self.status_var.set(f"処理完了: {deleted_count}個のシート削除")
+            return True
+            
+        except Exception as e:
+            self.status_var.set(f"ハイブリッド処理エラー: {str(e)}")
+            # エラーが発生してもopenpyxl方式にフォールバック
+            print(f"ハイブリッド方式エラー、標準方式にフォールバック: {e}")
+            return self.delete_sheets_openpyxl_method(selected_sheets)
+    
+    def delete_sheets_openpyxl_method(self, selected_sheets):
+        """openpyxl方式でシートを削除（安定・推奨）"""
+        try:
+            from openpyxl import load_workbook
+            
+            # ファイルを読み込み
+            self.status_var.set("Excelファイルを読み込み中...")
+            self.root.update()
+            
+            workbook = load_workbook(self.file_path)
+            
+            # 削除前のシート数を確認
+            initial_sheet_count = len(workbook.sheetnames)
+            self.status_var.set(f"削除処理中... (現在のシート数: {initial_sheet_count})")
+            self.root.update()
+            
+            # シートを削除
+            deleted_count = 0
+            for sheet_name in selected_sheets:
+                if sheet_name in workbook.sheetnames:
+                    try:
+                        sheet = workbook[sheet_name]
+                        workbook.remove(sheet)
+                        deleted_count += 1
+                        self.status_var.set(f"削除中: {sheet_name} ({deleted_count}/{len(selected_sheets)})")
+                        self.root.update()
+                    except Exception as e:
+                        print(f"シート '{sheet_name}' の削除中にエラー: {e}")
+                        continue
+            
+            # 削除後のシート数を確認
+            final_sheet_count = len(workbook.sheetnames)
+            
+            if final_sheet_count == 0:
+                raise ValueError("すべてのシートが削除されました。最低1つのシートは必要です。")
+            
+            # ファイルを保存
+            self.status_var.set("ファイルを保存中...")
+            self.root.update()
+            
+            workbook.save(self.file_path)
+            
+            self.status_var.set(f"保存完了: {deleted_count}個のシートを削除")
+            return True
+            
+        except Exception as e:
+            self.status_var.set(f"openpyxl処理エラー: {str(e)}")
+            raise e
+    
+    def delete_sheets(self):
+        """選択されたシートを削除"""
+        if not self.sheet_info:
+            messagebox.showerror("エラー", "ファイルが読み込まれていません")
+            return
+        
+        # 選択されたシートを取得
+        selected_sheets = [sheet_name for sheet_name, var in self.sheet_vars.items() if var.get()]
+        
+        if not selected_sheets:
+            messagebox.showwarning("警告", "削除するシートが選択されていません")
+            return
+        
+        # 残るシートが1つ以上あるかチェック
+        remaining_sheets = len(self.sheet_info) - len(selected_sheets)
+        if remaining_sheets < 1:
+            messagebox.showerror("エラー", "最低1つのシートは必要です。\nすべてのシートを削除することはできません。")
+            return
+        
+        # 確認ダイアログ
+        method_text = "画像保持方式（ハイブリッド）" if self.method_var.get() == "hybrid_method" else "標準方式（openpyxl）"
+        message = f"処理方法: {method_text}\n\n以下のシートを削除しますか？\n\n"
+        message += "\n".join(f"• {sheet}" for sheet in selected_sheets)
+        message += f"\n\n残るシート数: {remaining_sheets}個"
+        
+        if not messagebox.askyesno("確認", message):
+            return
+        
+        # バックアップファイルパス
+        backup_path = None
+        
+        try:
+            # バックアップを作成
+            if self.backup_var.get():
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                backup_path = self.file_path.replace('.xlsx', f'_backup_{timestamp}.xlsx')
+                backup_path = backup_path.replace('.xls', f'_backup_{timestamp}.xls')  # .xlsの場合も対応
+                shutil.copy2(self.file_path, backup_path)
+                self.status_var.set(f"バックアップ作成: {os.path.basename(backup_path)}")
+            
+            # ファイルがロックされていないか確認
+            self.check_file_accessibility()
+            
+            # 選択した方式でシートを削除
+            success = False
+            if self.method_var.get() == "hybrid_method":
+                success = self.delete_sheets_hybrid_method(selected_sheets)
+            else:
+                success = self.delete_sheets_openpyxl_method(selected_sheets)
+            
+            if success:
+                # ファイル情報を更新
+                self.load_file()  # ファイルを再読み込み
+                
+                messagebox.showinfo("完了", f"{len(selected_sheets)}個のシートを削除しました")
+                self.status_var.set(f"削除完了: {len(selected_sheets)}個のシート")
+            else:
+                self.status_var.set("削除処理が完了しませんでした")
+            
+        except PermissionError as e:
+            error_msg = f"ファイルアクセス権限エラー:\n{e}\n\n以下を確認してください:\n• Excelファイルが他のアプリで開かれていないか\n• ファイルが読み取り専用になっていないか\n• 管理者権限で実行する必要があるか"
+            messagebox.showerror("権限エラー", error_msg)
+            self.status_var.set("エラー: ファイルアクセス権限")
+            
+        except FileNotFoundError as e:
+            error_msg = f"ファイルが見つかりません:\n{e}\n\nファイルパスを確認してください。"
+            messagebox.showerror("ファイルエラー", error_msg)
+            self.status_var.set("エラー: ファイル未発見")
+            
+        except Exception as e:
+            error_msg = f"削除処理中にエラーが発生しました:\n\nエラータイプ: {type(e).__name__}\nエラー詳細: {str(e)}\n\nバックアップファイルから復元してください。"
+            messagebox.showerror("処理エラー", error_msg)
+            self.status_var.set("エラー: 削除処理失敗")
+            
+            # バックアップがある場合は復元オプションを提示
+            if backup_path and os.path.exists(backup_path):
+                restore_msg = f"エラーが発生しました。バックアップファイルから復元しますか?\n\nバックアップ: {os.path.basename(backup_path)}"
+                if messagebox.askyesno("復元", restore_msg):
+                    try:
+                        shutil.copy2(backup_path, self.file_path)
+                        self.load_file()
+                        messagebox.showinfo("復元完了", "バックアップファイルから復元しました")
+                        self.status_var.set("バックアップから復元完了")
+                    except Exception as restore_error:
+                        messagebox.showerror("復元エラー", f"復元に失敗しました:\n{restore_error}")
+    
+    def check_file_accessibility(self):
+        """ファイルがアクセス可能か確認"""
+        try:
+            # ファイルを書き込みモードで開いてみる（実際には書き込まない）
+            with open(self.file_path, 'r+b') as f:
+                pass
+        except PermissionError:
+            raise PermissionError(f"ファイルがロックされています: {self.file_path}")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"ファイルが見つかりません: {self.file_path}")
+
+
+def main():
+    root = tk.Tk()
+    app = ExcelSheetDeleterGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
