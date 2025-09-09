@@ -6,7 +6,6 @@ import zipfile
 from datetime import datetime
 from xml.etree import ElementTree as ET
 import tempfile
-import re
 
 class ExcelSheetDeleterGUI:
     def __init__(self, root):
@@ -58,10 +57,10 @@ class ExcelSheetDeleterGUI:
         method_frame = ttk.LabelFrame(main_frame, text="処理方法", padding="5")
         method_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        self.method_var = tk.StringVar(value="safe_zip_method")
-        safe_zip_radio = ttk.Radiobutton(method_frame, text="安全なZIP方式（画像・チャート保持、推奨）", 
-                                        variable=self.method_var, value="safe_zip_method")
-        safe_zip_radio.grid(row=0, column=0, sticky=tk.W)
+        self.method_var = tk.StringVar(value="zip_method")
+        zip_radio = ttk.Radiobutton(method_frame, text="ZIP方式（画像・チャート保持、推奨）", 
+                                   variable=self.method_var, value="zip_method")
+        zip_radio.grid(row=0, column=0, sticky=tk.W)
         
         openpyxl_radio = ttk.Radiobutton(method_frame, text="openpyxl方式（高速だが画像消失）", 
                                         variable=self.method_var, value="openpyxl_method")
@@ -181,35 +180,14 @@ class ExcelSheetDeleterGUI:
                 'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
             }
             
-            # workbook.xml.relsも読み込み
-            try:
-                rels_xml = zf.read('xl/_rels/workbook.xml.rels')
-                rels_root = ET.fromstring(rels_xml)
-                rels_ns = {'r': 'http://schemas.openxmlformats.org/package/2006/relationships'}
-                
-                # リレーションシップマッピングを作成
-                rel_mapping = {}
-                for rel in rels_root.findall('r:Relationship', rels_ns):
-                    rel_id = rel.get('Id')
-                    target = rel.get('Target')
-                    rel_mapping[rel_id] = target
-            except:
-                rel_mapping = {}
-            
             # シート情報を取得
             sheets = root.findall('.//main:sheet', namespaces)
             for sheet in sheets:
                 sheet_id = sheet.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
                 sheet_name = sheet.get('name')
-                sheet_number = sheet.get('sheetId')
-                
-                # ターゲットファイルを取得
-                target_file = rel_mapping.get(sheet_id, '')
-                
                 self.sheet_info[sheet_name] = {
                     'id': sheet_id,
-                    'sheetId': sheet_number,
-                    'target': target_file
+                    'sheetId': sheet.get('sheetId')
                 }
     
     def create_sheet_checkboxes(self):
@@ -249,138 +227,101 @@ class ExcelSheetDeleterGUI:
         for var in self.sheet_vars.values():
             var.set(False)
     
-    def delete_sheets_safe_zip_method(self, selected_sheets):
-        """安全なZIP方式でシートを削除（画像・チャート保持）"""
+    def delete_sheets_zip_method(self, selected_sheets):
+        """ZIP方式でシートを削除（画像・チャート保持）"""
         try:
-            # 一時ディレクトリを作成
-            with tempfile.TemporaryDirectory() as temp_dir:
-                temp_zip_path = os.path.join(temp_dir, 'temp.xlsx')
-                
-                # 削除するシートの情報を収集
-                sheets_to_delete_info = {}
-                for sheet_name in selected_sheets:
-                    if sheet_name in self.sheet_info:
-                        sheets_to_delete_info[sheet_name] = self.sheet_info[sheet_name]
-                
-                # 元のファイルをZIPとして開く
-                with zipfile.ZipFile(self.file_path, 'r') as source_zip:
-                    with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as target_zip:
+            # 一時ファイルを作成
+            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+                temp_path = temp_file.name
+            
+            # 元のファイルをZIPとして開く
+            with zipfile.ZipFile(self.file_path, 'r') as source_zip:
+                with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as target_zip:
+                    
+                    # 削除するシートのIDを取得
+                    sheets_to_delete_ids = []
+                    for sheet_name in selected_sheets:
+                        if sheet_name in self.sheet_info:
+                            sheets_to_delete_ids.append(self.sheet_info[sheet_name]['id'])
+                    
+                    # すべてのファイルをコピー（削除対象のシートファイル以外）
+                    for item in source_zip.infolist():
+                        # 削除するシートのワークシートファイルをスキップ
+                        skip_file = False
+                        if item.filename.startswith('xl/worksheets/'):
+                            # rels情報から対象シートのファイル名を判定
+                            for sheet_id in sheets_to_delete_ids:
+                                if sheet_id in item.filename or any(sheet_id.replace('rId', '') in item.filename for sheet_id in sheets_to_delete_ids):
+                                    skip_file = True
+                                    break
                         
-                        # 削除するワークシートファイルのリストを作成
-                        worksheet_files_to_delete = set()
-                        for sheet_info in sheets_to_delete_info.values():
-                            if sheet_info['target']:
-                                worksheet_files_to_delete.add('xl/' + sheet_info['target'])
-                        
-                        # すべてのファイルをコピー（削除対象以外）
-                        for item in source_zip.infolist():
-                            # 削除するワークシートファイルをスキップ
-                            if item.filename in worksheet_files_to_delete:
-                                continue
-                            
+                        if not skip_file:
                             data = source_zip.read(item.filename)
                             
-                            # 特定のXMLファイルを更新
+                            # workbook.xmlとworkbook.xml.relsを更新
                             if item.filename == 'xl/workbook.xml':
-                                data = self.update_workbook_xml_safe(data, selected_sheets)
+                                data = self.update_workbook_xml(data, selected_sheets)
                             elif item.filename == 'xl/_rels/workbook.xml.rels':
-                                data = self.update_workbook_rels_safe(data, sheets_to_delete_info)
-                            elif item.filename == '[Content_Types].xml':
-                                data = self.update_content_types_xml(data, worksheet_files_to_delete)
+                                data = self.update_workbook_rels(data, selected_sheets)
                             
                             target_zip.writestr(item, data)
-                
-                # 元のファイルを置き換え
-                shutil.move(temp_zip_path, self.file_path)
-                return True
-                
+            
+            # 元のファイルを置き換え
+            shutil.move(temp_path, self.file_path)
+            return True
+            
         except Exception as e:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
             raise e
     
-    def update_workbook_xml_safe(self, xml_data, sheets_to_delete):
-        """workbook.xmlからシート情報を安全に削除"""
-        try:
-            # XMLを文字列として処理（より安全）
-            xml_str = xml_data.decode('utf-8')
+    def update_workbook_xml(self, xml_data, sheets_to_delete):
+        """workbook.xmlからシート情報を削除"""
+        root = ET.fromstring(xml_data)
+        namespaces = {
+            'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+            'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+        }
+        
+        # 削除するシートを見つけて削除
+        sheets_element = root.find('.//main:sheets', namespaces)
+        if sheets_element is not None:
+            sheets_to_remove = []
+            for sheet in sheets_element.findall('main:sheet', namespaces):
+                sheet_name = sheet.get('name')
+                if sheet_name in sheets_to_delete:
+                    sheets_to_remove.append(sheet)
             
-            # 各削除対象シートについてXMLから削除
-            for sheet_name in sheets_to_delete:
-                # シート要素を見つけて削除（正規表現使用）
-                pattern = r'<sheet[^>]*name="' + re.escape(sheet_name) + r'"[^>]*/?>'
-                xml_str = re.sub(pattern, '', xml_str)
-            
-            return xml_str.encode('utf-8')
-            
-        except Exception:
-            # XMLパースに失敗した場合はElementTreeを使用
-            root = ET.fromstring(xml_data)
-            namespaces = {
-                'main': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
-            }
-            
-            sheets_element = root.find('.//main:sheets', namespaces)
-            if sheets_element is not None:
-                sheets_to_remove = []
-                for sheet in sheets_element.findall('main:sheet', namespaces):
-                    sheet_name = sheet.get('name')
-                    if sheet_name in sheets_to_delete:
-                        sheets_to_remove.append(sheet)
-                
-                for sheet in sheets_to_remove:
-                    sheets_element.remove(sheet)
-            
-            return ET.tostring(root, encoding='utf-8', xml_declaration=True)
+            for sheet in sheets_to_remove:
+                sheets_element.remove(sheet)
+        
+        # XMLを文字列に戻す
+        return ET.tostring(root, encoding='utf-8', xml_declaration=True)
     
-    def update_workbook_rels_safe(self, xml_data, sheets_to_delete_info):
-        """workbook.xml.relsからシートの関連情報を安全に削除"""
-        try:
-            xml_str = xml_data.decode('utf-8')
-            
-            # 削除するリレーションシップIDを収集
-            rel_ids_to_delete = [info['id'] for info in sheets_to_delete_info.values()]
-            
-            # 各リレーションシップを削除
-            for rel_id in rel_ids_to_delete:
-                pattern = r'<Relationship[^>]*Id="' + re.escape(rel_id) + r'"[^>]*/?>'
-                xml_str = re.sub(pattern, '', xml_str)
-            
-            return xml_str.encode('utf-8')
-            
-        except Exception:
-            # フォールバック処理
-            root = ET.fromstring(xml_data)
-            namespaces = {'r': 'http://schemas.openxmlformats.org/package/2006/relationships'}
-            
-            rel_ids_to_delete = [info['id'] for info in sheets_to_delete_info.values()]
-            relationships_to_remove = []
-            
-            for rel in root.findall('r:Relationship', namespaces):
-                rel_id = rel.get('Id')
-                if rel_id in rel_ids_to_delete:
-                    relationships_to_remove.append(rel)
-            
-            for rel in relationships_to_remove:
-                root.remove(rel)
-            
-            return ET.tostring(root, encoding='utf-8', xml_declaration=True)
-    
-    def update_content_types_xml(self, xml_data, worksheet_files_to_delete):
-        """[Content_Types].xmlを更新"""
-        try:
-            xml_str = xml_data.decode('utf-8')
-            
-            # 削除するワークシートファイルのOverrideエントリを削除
-            for worksheet_file in worksheet_files_to_delete:
-                # パスを正規化
-                part_name = '/' + worksheet_file
-                pattern = r'<Override[^>]*PartName="' + re.escape(part_name) + r'"[^>]*/?>'
-                xml_str = re.sub(pattern, '', xml_str)
-            
-            return xml_str.encode('utf-8')
-            
-        except Exception:
-            # エラーが発生した場合は元のデータをそのまま返す
-            return xml_data
+    def update_workbook_rels(self, xml_data, sheets_to_delete):
+        """workbook.xml.relsからシートの関連情報を削除"""
+        root = ET.fromstring(xml_data)
+        namespaces = {
+            'main': 'http://schemas.openxmlformats.org/package/2006/relationships'
+        }
+        
+        # 削除するシートのIDを取得
+        sheet_ids_to_delete = []
+        for sheet_name in sheets_to_delete:
+            if sheet_name in self.sheet_info:
+                sheet_ids_to_delete.append(self.sheet_info[sheet_name]['id'])
+        
+        # 関連する関係を削除
+        relationships_to_remove = []
+        for rel in root.findall('main:Relationship', namespaces):
+            rel_id = rel.get('Id')
+            if rel_id in sheet_ids_to_delete:
+                relationships_to_remove.append(rel)
+        
+        for rel in relationships_to_remove:
+            root.remove(rel)
+        
+        return ET.tostring(root, encoding='utf-8', xml_declaration=True)
     
     def delete_sheets_openpyxl_method(self, selected_sheets):
         """openpyxl方式でシートを削除（従来の方法）"""
@@ -417,7 +358,7 @@ class ExcelSheetDeleterGUI:
             return
         
         # 確認ダイアログ
-        method_text = "安全なZIP方式（画像保持）" if self.method_var.get() == "safe_zip_method" else "openpyxl方式（高速）"
+        method_text = "ZIP方式（画像保持）" if self.method_var.get() == "zip_method" else "openpyxl方式（高速）"
         message = f"処理方法: {method_text}\n\n以下のシートを削除しますか？\n\n"
         message += "\n".join(f"• {sheet}" for sheet in selected_sheets)
         message += f"\n\n残るシート数: {remaining_sheets}個"
@@ -434,8 +375,8 @@ class ExcelSheetDeleterGUI:
                 self.status_var.set(f"バックアップ作成: {os.path.basename(backup_path)}")
             
             # 選択した方式でシートを削除
-            if self.method_var.get() == "safe_zip_method":
-                success = self.delete_sheets_safe_zip_method(selected_sheets)
+            if self.method_var.get() == "zip_method":
+                success = self.delete_sheets_zip_method(selected_sheets)
             else:
                 success = self.delete_sheets_openpyxl_method(selected_sheets)
             
